@@ -1,34 +1,24 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import os, re, shutil
 from io import BytesIO
-from datetime import datetime
+import re
 
 DB_FILE = "historico_nomina.db"
-BACKUP_DIR = "backups_historico"
 
-REQUIRED = ["agrupador","concepto","clave","nombre_completo","importe","periodo"]
+st.set_page_config(page_title="Histórico de Nómina", page_icon="📊", layout="wide")
+
 ALIASES = {
-    "agrupador": ["agrupador","grupo","agrupación"],
-    "concepto": ["concepto","conceptos"],
-    "clave": ["clave","nomina","nómina","numero de nomina","número de nómina"],
-    "nombre_completo": ["nombre_completo","nombre completo","nombre","trabajador"],
-    "importe": ["importe","monto","cantidad","importe total"],
-    "periodo": ["periodo","período","semana","period"],
+    "agrupador": ["agrupador", "grupo", "agrupación"],
+    "concepto": ["concepto", "conceptos"],
+    "clave": ["clave", "nomina", "nómina", "numero de nomina", "número de nómina"],
+    "nombre_completo": ["nombre_completo", "nombre completo", "nombre", "trabajador"],
+    "importe": ["importe", "monto", "cantidad", "importe total"],
+    "periodo": ["periodo", "período", "semana", "period"],
 }
-
-st.set_page_config(page_title="Auditoría de Nómina V4", page_icon="📊", layout="wide")
 
 def clean_col(c):
     return re.sub(r"\s+", " ", str(c).strip().lower())
-
-def period_key(period):
-    m = re.search(r"(\d+)", str(period))
-    return (0, int(m.group(1))) if m else (1, str(period))
-
-def ordered_periods(df):
-    return sorted(df["periodo"].dropna().astype(str).unique(), key=period_key)
 
 def detect_columns(df):
     normalized = {clean_col(c): c for c in df.columns}
@@ -41,39 +31,29 @@ def detect_columns(df):
     return found
 
 def normalize(df):
-    # The supplied Excel has headers in row 2 (index 1), so retry that layout.
     found = detect_columns(df)
-    if len(found) < len(REQUIRED):
-        for header in [1, 2, 0]:
-            try:
-                test = pd.read_excel(current_file_bytes, header=header)
-                found = detect_columns(test)
-                if len(found) == len(REQUIRED):
-                    df = test
-                    break
-            except Exception:
-                pass
-    found = detect_columns(df)
-    missing = [x for x in REQUIRED if x not in found]
+    missing = [x for x in ALIASES if x not in found]
     if missing:
         raise ValueError(
-            "No pude identificar: " + ", ".join(missing) +
-            ". Encabezados encontrados: " + ", ".join(map(str, df.columns))
+            "No pude identificar estas columnas: " + ", ".join(missing) +
+            ". Columnas encontradas: " + ", ".join(map(str, df.columns))
         )
-    out = pd.DataFrame({k: df[v] for k,v in found.items()})
-    out["clave"] = out["clave"].astype(str).str.strip().str.replace(r"\.0$","",regex=True)
+    out = pd.DataFrame()
+    for target, source in found.items():
+        out[target] = df[source]
+    out["clave"] = out["clave"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
     out["nombre_completo"] = out["nombre_completo"].astype(str).str.strip()
     out["concepto"] = out["concepto"].astype(str).str.strip()
     out["periodo"] = out["periodo"].astype(str).str.strip()
     out["agrupador"] = out["agrupador"].astype(str).str.strip()
     out["importe"] = pd.to_numeric(out["importe"], errors="coerce").fillna(0)
-    return out[REQUIRED]
+    return out[["agrupador","concepto","clave","nombre_completo","importe","periodo"]]
 
-def get_conn():
+def conn():
     return sqlite3.connect(DB_FILE)
 
 def init_db():
-    c = get_conn()
+    c = conn()
     c.execute("""
     CREATE TABLE IF NOT EXISTS movimientos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,25 +64,13 @@ def init_db():
         importe REAL,
         periodo TEXT,
         UNIQUE(agrupador, concepto, clave, nombre_completo, importe, periodo)
-    )""")
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS config (
-        clave TEXT PRIMARY KEY,
-        valor TEXT
-    )""")
+    )
+    """)
     c.commit(); c.close()
 
-def get_history():
-    c = get_conn()
-    df = pd.read_sql_query(
-        "SELECT agrupador, concepto, clave, nombre_completo, importe, periodo FROM movimientos", c
-    )
-    c.close()
-    return df
-
 def add_history(df):
-    c = get_conn()
-    inserted = dup = 0
+    c = conn()
+    inserted = duplicated = 0
     for r in df.itertuples(index=False, name=None):
         cur = c.execute("""
         INSERT OR IGNORE INTO movimientos
@@ -110,29 +78,31 @@ def add_history(df):
         VALUES (?,?,?,?,?,?)
         """, r)
         if cur.rowcount: inserted += 1
-        else: dup += 1
+        else: duplicated += 1
     c.commit(); c.close()
-    return inserted, dup
+    return inserted, duplicated
 
-def make_backup():
-    if not os.path.exists(DB_FILE):
-        return None
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    name = datetime.now().strftime("historico_%Y%m%d_%H%M%S.db")
-    path = os.path.join(BACKUP_DIR, name)
-    shutil.copy2(DB_FILE, path)
-    return path
+
+def period_key(period):
+    m = re.search(r'(\d+)', str(period))
+    return (0, int(m.group(1))) if m else (1, str(period))
+
+def ordered_periods(df):
+    return sorted(df["periodo"].dropna().astype(str).unique(), key=period_key)
 
 def compare_periods(df, previous, current):
-    p = df[df.periodo.isin([previous,current])]
-    if p.empty: return pd.DataFrame()
+    p = df[df["periodo"].isin([previous, current])].copy()
+    if p.empty:
+        return pd.DataFrame()
     piv = p.pivot_table(
-        index=["clave","nombre_completo","concepto"],
+        index=["clave", "nombre_completo", "concepto"],
         columns="periodo", values="importe", aggfunc="sum", fill_value=0
     ).reset_index()
-    for col in [previous,current]:
-        if col not in piv.columns: piv[col] = 0.0
+    for col in (previous, current):
+        if col not in piv.columns:
+            piv[col] = 0.0
     piv["diferencia"] = piv[current] - piv[previous]
+    piv["afectado"] = piv["diferencia"] != 0
     piv["tipo"] = piv["diferencia"].apply(
         lambda x: "Aumento" if x > 0 else ("Disminución" if x < 0 else "Sin cambio")
     )
@@ -140,370 +110,210 @@ def compare_periods(df, previous, current):
 
 def affected_workers(df, previous, current):
     comp = compare_periods(df, previous, current)
-    if comp.empty: return pd.DataFrame()
-    out = comp.groupby(["clave","nombre_completo"], as_index=False).agg(
-        importe_anterior=(previous,"sum"),
-        importe_actual=(current,"sum"),
-        diferencia=("diferencia","sum"),
-        conceptos_afectados=("tipo", lambda s: (s != "Sin cambio").sum())
+    if comp.empty:
+        return pd.DataFrame()
+    out = comp.groupby(["clave", "nombre_completo"], as_index=False).agg(
+        importe_anterior=(previous, "sum"),
+        importe_actual=(current, "sum"),
+        diferencia=("diferencia", "sum"),
+        conceptos_afectados=("afectado", "sum")
     )
-    out["perdida"] = out.diferencia.apply(lambda x: -x if x < 0 else 0)
-    out["estado"] = out.diferencia.apply(
-        lambda x: "🔴 Disminuyó" if x < 0 else ("🔵 Aumentó" if x > 0 else "🟢 Sin cambio")
-    )
-    return out.sort_values("diferencia")
-
-def get_alerts(df, previous, current, loss_threshold, pct_threshold):
-    comp = compare_periods(df, previous, current)
-    if comp.empty: return {}
-    worker = affected_workers(df, previous, current)
-    decreases = worker[worker.diferencia < 0].copy()
-    increases = worker[worker.diferencia > 0].copy()
-
-    detail = comp[comp.diferencia != 0].copy()
-    detail["pct"] = detail.apply(
-        lambda r: ((r["diferencia"] / r[previous]) * 100) if r[previous] else None, axis=1
-    )
-
-    # Concepts missing in current period after existing in previous.
-    missing_concepts = detail[
-        (detail[previous] != 0) & (detail[current] == 0)
-    ].copy()
-
-    # New concepts in current.
-    new_concepts = detail[
-        (detail[previous] == 0) & (detail[current] != 0)
-    ].copy()
-
-    big_losses = decreases[
-        decreases["perdida"] >= loss_threshold
-    ].copy()
-
-    return {
-        "workers": worker,
-        "decreases": decreases,
-        "increases": increases,
-        "big_losses": big_losses,
-        "missing_concepts": missing_concepts,
-        "new_concepts": new_concepts,
-        "detail": detail,
-    }
-
-def worker_explanation(df, clave, previous, current):
-    comp = compare_periods(df[df.clave == clave], previous, current)
-    if comp.empty: return None
-    row = comp.groupby("concepto", as_index=False)[[previous,current,"diferencia"]].sum()
-    row["resultado"] = row.diferencia.apply(
+    out["tipo"] = out["diferencia"].apply(
         lambda x: "Aumentó" if x > 0 else ("Disminuyó" if x < 0 else "Sin cambio")
     )
-    return row.sort_values("diferencia")
+    out["perdida"] = out["diferencia"].apply(lambda x: -x if x < 0 else 0)
+    return out.sort_values("diferencia")
 
-def worker_history(df, clave):
-    return df[df.clave == clave].copy()
+def worker_change_detail(df, previous, current):
+    comp = compare_periods(df, previous, current)
+    return comp[comp["afectado"]].sort_values(["clave", "diferencia"]) if not comp.empty else comp
 
-def set_config(key, value):
-    c=get_conn()
-    c.execute("INSERT OR REPLACE INTO config(clave,valor) VALUES(?,?)",(key,str(value)))
-    c.commit(); c.close()
+def make_backup():
+    if os.path.exists(DB_FILE):
+        os.makedirs("backups_historico", exist_ok=True)
+        name = datetime.now().strftime("historico_%Y%m%d_%H%M%S.db")
+        path = os.path.join("backups_historico", name)
+        shutil.copy2(DB_FILE, path)
+        return path
+    return None
 
-def get_config(key, default):
-    c=get_conn()
-    r=c.execute("SELECT valor FROM config WHERE clave=?",(key,)).fetchone()
+def get_history():
+    c = conn()
+    d = pd.read_sql_query("SELECT agrupador, concepto, clave, nombre_completo, importe, periodo FROM movimientos", c)
     c.close()
-    return r[0] if r else default
+    return d
 
 init_db()
 
-st.title("📊 Auditoría de Nómina V4")
-st.caption("Histórico acumulativo · Auditoría automática · Comparativos · Alertas · Altas/Bajas · Rotación")
+st.title("📊 Histórico de Nómina")
+st.caption("Base de Excel actualizable + histórico acumulativo + consulta por número de nómina")
 
-# ---------- SIDEBAR ----------
 with st.sidebar:
-    st.header("📥 Cargar Excel")
-    uploaded = st.file_uploader("Selecciona el Excel de la semana", type=["xlsx","xls"])
+    st.header("💾 Respaldo")
+    if st.button("Crear respaldo ahora"):
+        backup = make_backup()
+        if backup:
+            st.success(f"Respaldo creado: {backup}")
+        else:
+            st.info("Aún no existe una base histórica para respaldar.")
 
-    if uploaded is not None:
+    st.header("📥 Actualizar histórico")
+    file = st.file_uploader("Carga el Excel de la semana", type=["xlsx","xls"])
+    if file:
         try:
-            current_file_bytes = uploaded.getvalue()
-            incoming = normalize(pd.read_excel(BytesIO(current_file_bytes), header=0))
-            periods_in_file = ", ".join(sorted(incoming.periodo.unique(), key=period_key))
-            st.success(f"Periodo detectado: {periods_in_file}")
+            incoming = normalize(pd.read_excel(file))
+            periods = ", ".join(sorted(incoming.periodo.unique()))
+            st.success(f"Periodo detectado: {periods}")
             st.caption(f"{len(incoming):,} registros")
             if st.button("➕ Agregar al histórico", type="primary"):
-                # Backup before changing the database.
-                if os.path.exists(DB_FILE):
-                    make_backup()
                 ins, dup = add_history(incoming)
                 st.success(f"Agregados: {ins:,}")
                 st.info(f"Duplicados ignorados: {dup:,}")
                 st.rerun()
         except Exception as e:
-            st.error(f"Error al leer el Excel: {e}")
-
-    st.divider()
-    st.header("⚙️ Reglas de alerta")
-    loss_threshold = st.number_input(
-        "Alertar pérdida desde $", min_value=0.0,
-        value=float(get_config("loss_threshold","100")), step=50.0
-    )
-    pct_threshold = st.number_input(
-        "Alertar reducción desde %", min_value=0.0,
-        value=float(get_config("pct_threshold","20")), step=5.0
-    )
-    if st.button("Guardar reglas"):
-        set_config("loss_threshold", loss_threshold)
-        set_config("pct_threshold", pct_threshold)
-        st.success("Reglas guardadas.")
-
-    st.divider()
-    st.header("💾 Seguridad")
-    if st.button("Crear respaldo ahora"):
-        backup = make_backup()
-        st.success(f"Respaldo: {backup}") if backup else st.info("No hay base para respaldar.")
+            st.error(str(e))
 
 hist = get_history()
-
 if hist.empty:
-    st.info("Carga el primer Excel desde el panel izquierdo para iniciar el histórico.")
+    st.info("Carga tu primer Excel desde el panel izquierdo.")
     st.stop()
 
-periods = ordered_periods(hist)
+c1,c2,c3,c4 = st.columns(4)
+c1.metric("Registros", f"{len(hist):,}")
+c2.metric("Trabajadores", f"{hist.clave.nunique():,}")
+c3.metric("Periodos", f"{hist.periodo.nunique():,}")
+c4.metric("Conceptos", f"{hist.concepto.nunique():,}")
 
-# ---------- DASHBOARD ----------
-st.subheader("📌 Centro de control")
-latest = periods[-1]
-previous = periods[-2] if len(periods) >= 2 else None
+t1,t2,t3,t4,t5 = st.tabs(["🔎 Buscar nómina","🔄 Cambios del trabajador","🚨 Afectados","📈 Histórico","🗃️ Base"])
 
-total_workers = hist[hist.periodo == latest].clave.nunique()
-total_amount = hist[hist.periodo == latest].importe.sum()
-
-if previous:
-    alerts = get_alerts(hist, previous, latest, loss_threshold, pct_threshold)
-    dec = alerts["decreases"]
-    inc = alerts["increases"]
-    loss = dec.perdida.sum()
-    affected_count = len(alerts["workers"])
-else:
-    alerts = {}
-    dec = pd.DataFrame(); inc = pd.DataFrame(); loss = 0; affected_count = 0
-
-a,b,c,d,e = st.columns(5)
-a.metric("Trabajadores actuales", f"{total_workers:,}")
-b.metric("Importe actual", f"${total_amount:,.2f}")
-c.metric("Afectados", f"{affected_count:,}")
-d.metric("Disminuyeron", f"{len(dec):,}")
-e.metric("Pérdida detectada", f"${loss:,.2f}")
-
-if previous:
-    st.info(f"Comparación automática: **{previous} → {latest}**")
-
-# ---------- TABS ----------
-t1,t2,t3,t4,t5,t6,t7 = st.tabs([
-    "🔎 Buscar nómina",
-    "🔄 Cambios",
-    "🚨 Centro de alertas",
-    "👥 Altas y bajas",
-    "📈 Rotación",
-    "📊 Histórico",
-    "🗃️ Base"
-])
-
-# SEARCH
 with t1:
     st.subheader("Buscar por número de nómina")
-    clave = st.text_input("Número de nómina", placeholder="Ej. 14100713").strip()
+    clave = st.text_input("Número de nómina / clave", placeholder="Ej. 12345").strip()
+
     if clave:
-        person = worker_history(hist, clave)
-        if person.empty:
+        persona = hist[hist.clave == clave].copy()
+        if persona.empty:
             st.warning("No se encontró esa nómina.")
         else:
-            name = person.nombre_completo.mode().iloc[0] if not person.nombre_completo.mode().empty else person.nombre_completo.iloc[0]
+            nombre = persona.nombre_completo.mode().iloc[0] if not persona.nombre_completo.mode().empty else persona.nombre_completo.iloc[0]
             a,b,c,d = st.columns(4)
-            a.metric("Nómina", clave); b.metric("Trabajador", name)
-            c.metric("Periodos", person.periodo.nunique()); d.metric("Total histórico", f"${person.importe.sum():,.2f}")
+            a.metric("Nómina", clave)
+            b.metric("Trabajador", nombre)
+            c.metric("Periodos", persona.periodo.nunique())
+            d.metric("Total histórico", f"${persona.importe.sum():,.2f}")
 
-            concept = st.selectbox("Concepto", ["Todos"] + sorted(person.concepto.unique()), key="search_concept")
-            detail = person if concept == "Todos" else person[person.concepto == concept]
-            pivot = detail.pivot_table(index="concepto", columns="periodo", values="importe", aggfunc="sum", fill_value=0)
-            if not pivot.empty:
-                pivot["TOTAL"] = pivot.sum(axis=1)
+            concepto = st.selectbox(
+                "Concepto",
+                ["Todos"] + sorted(persona.concepto.unique().tolist())
+            )
+            detalle = persona if concepto == "Todos" else persona[persona.concepto == concepto]
+
+            pivot = detalle.pivot_table(
+                index="concepto", columns="periodo", values="importe",
+                aggfunc="sum", fill_value=0
+            )
+            pivot["TOTAL"] = pivot.sum(axis=1)
+
+            st.subheader("💰 Lo que cobró por concepto en cada periodo")
             st.dataframe(pivot.style.format("${:,.2f}"), use_container_width=True)
 
-            if concept != "Todos":
-                st.line_chart(detail.groupby("periodo")["importe"].sum())
+            if concepto != "Todos":
+                serie = detalle.groupby("periodo")["importe"].sum()
+                st.subheader(f"📈 Evolución: {concepto}")
+                st.line_chart(serie)
 
-            st.subheader("📋 Detalle")
-            st.dataframe(detail.sort_values(["periodo","concepto"]).style.format({"importe":"${:,.2f}"}), use_container_width=True)
+            st.subheader("📋 Detalle de movimientos")
+            st.dataframe(
+                detalle.sort_values(["periodo","concepto"]).style.format({"importe":"${:,.2f}"}),
+                use_container_width=True
+            )
 
-            if previous and latest:
-                st.subheader(f"🧾 Explicación {previous} → {latest}")
-                explanation = worker_explanation(hist, clave, previous, latest)
-                if explanation is not None:
-                    st.dataframe(
-                        explanation.style.format({previous:"${:,.2f}",latest:"${:,.2f}","diferencia":"${:,.2f}"}),
-                        use_container_width=True
-                    )
-                    st.download_button(
-                        "⬇️ Descargar historial de la nómina",
-                        detail.to_csv(index=False).encode("utf-8-sig"),
-                        f"nomina_{clave}.csv", "text/csv", key="dl_person"
-                    )
+            st.download_button(
+                "⬇️ Descargar consulta",
+                detalle.to_csv(index=False).encode("utf-8-sig"),
+                f"nomina_{clave}.csv",
+                "text/csv"
+            )
 
-# CHANGES
-with t2:
-    st.subheader("🔄 Cambios del trabajador")
-    clave2 = st.text_input("Número de nómina", placeholder="Ej. 14100713", key="change_key").strip()
-    if clave2:
-        person = worker_history(hist, clave2)
-        if person.empty:
-            st.warning("No se encontró esa nómina.")
-        else:
-            st.subheader("💵 Evolución semanal")
-            weekly = person.groupby("periodo", as_index=False).importe.sum()
-            weekly["orden"] = weekly.periodo.map(period_key)
-            weekly = weekly.sort_values("orden").drop(columns="orden")
-            st.dataframe(weekly.style.format({"importe":"${:,.2f}"}), use_container_width=True)
-            st.line_chart(weekly.set_index("periodo")["importe"])
-
-            changes=[]
-            for concept, g in person.groupby("concepto"):
-                x=g.groupby("periodo",as_index=False).importe.sum()
-                x["orden"]=x.periodo.map(period_key); x=x.sort_values("orden")
-                vals=x[["periodo","importe"]].to_dict("records")
-                if vals:
-                    changes.append(["Inicio de concepto",concept,vals[0]["periodo"],0,vals[0]["importe"],vals[0]["importe"]])
-                for p,curr in zip(vals,vals[1:]):
-                    delta=curr["importe"]-p["importe"]
-                    if delta:
-                        changes.append(["Aumento" if delta>0 else "Disminución",concept,curr["periodo"],p["importe"],curr["importe"],delta])
-            ch=pd.DataFrame(changes,columns=["Tipo","Concepto","Periodo","Anterior","Nuevo","Cambio"])
-            if not ch.empty:
-                st.dataframe(ch.style.format({"Anterior":"${:,.2f}","Nuevo":"${:,.2f}","Cambio":"${:,.2f}"}),use_container_width=True)
-                st.download_button("⬇️ Descargar cambios",ch.to_csv(index=False).encode("utf-8-sig"),f"cambios_{clave2}.csv","text/csv",key="dl_changes")
-
-# ALERT CENTER
 with t3:
-    st.subheader("🚨 Centro de alertas")
-    if not previous:
-        st.info("Se requieren al menos dos periodos.")
+    st.subheader("🚨 Detector de trabajadores afectados")
+    st.caption("Compara dos periodos y detecta quién tuvo una disminución o aumento y qué concepto lo provocó.")
+
+    periods = ordered_periods(hist)
+    if len(periods) < 2:
+        st.info("Necesitas al menos dos periodos históricos para comparar.")
     else:
-        st.write(f"**{previous} → {latest}**")
-        big = alerts["big_losses"]
-        missing = alerts["missing_concepts"]
-        newc = alerts["new_concepts"]
+        ca, cb = st.columns(2)
+        previous = ca.selectbox("Periodo anterior", periods[:-1], index=len(periods[:-1])-1, key="affected_previous")
+        current = cb.selectbox("Periodo actual", periods[1:], index=len(periods[1:])-1, key="affected_current")
 
-        x1,x2,x3,x4 = st.columns(4)
-        x1.metric("🔴 Pérdidas sobre umbral", len(big))
-        x2.metric("🟠 Conceptos desaparecidos", len(missing))
-        x3.metric("🔵 Conceptos nuevos", len(newc))
-        x4.metric("📉 Pérdida total", f"${loss:,.2f}")
-
-        if not big.empty:
-            st.subheader("🔴 Trabajadores con pérdida relevante")
-            st.dataframe(big[["clave","nombre_completo","importe_anterior","importe_actual","perdida","estado"]]
-                         .style.format({"importe_anterior":"${:,.2f}","importe_actual":"${:,.2f}","perdida":"${:,.2f}"}), use_container_width=True)
-
-        if not missing.empty:
-            st.subheader("🟠 Conceptos que desaparecieron")
-            st.dataframe(missing[["clave","nombre_completo","concepto",previous,latest,"diferencia"]]
-                         .style.format({previous:"${:,.2f}",latest:"${:,.2f}","diferencia":"${:,.2f}"}), use_container_width=True)
-
-        if not newc.empty:
-            st.subheader("🔵 Conceptos nuevos")
-            st.dataframe(newc[["clave","nombre_completo","concepto",previous,latest,"diferencia"]]
-                         .style.format({previous:"${:,.2f}",latest:"${:,.2f}","diferencia":"${:,.2f}"}), use_container_width=True)
-
-        if not big.empty:
-            st.bar_chart(big.set_index("nombre_completo")["perdida"].head(20))
-
-# HIGH/LOW / NEW / RETURNING
-with t4:
-    st.subheader("👥 Altas, bajas y movimientos")
-    if len(periods)<2:
-        st.info("Se requieren al menos dos periodos.")
-    else:
-        prev_set=set(hist[hist.periodo==previous].clave)
-        curr_set=set(hist[hist.periodo==latest].clave)
-        altas=sorted(curr_set-prev_set)
-        bajas=sorted(prev_set-curr_set)
-        regresos=[]
-
-        older=set(hist[hist.periodo.isin(periods[:-2])].clave) if len(periods)>2 else set()
-        regresos=sorted((curr_set-prev_set)&older)
-
-        q1,q2,q3=st.columns(3)
-        q1.metric("🟢 Posibles altas",len(altas))
-        q2.metric("🔴 Posibles bajas",len(bajas))
-        q3.metric("🔵 Regresos",len(regresos))
-
-        if altas:
-            st.subheader("🟢 Posibles altas")
-            st.dataframe(hist[hist.clave.isin(altas)&(hist.periodo==latest)][["clave","nombre_completo","agrupador"]].drop_duplicates(),use_container_width=True)
-        if bajas:
-            st.subheader("🔴 Posibles bajas")
-            st.dataframe(hist[hist.clave.isin(bajas)&(hist.periodo==previous)][["clave","nombre_completo","agrupador"]].drop_duplicates(),use_container_width=True)
-        if regresos:
-            st.subheader("🔵 Trabajadores que regresaron")
-            st.dataframe(hist[hist.clave.isin(regresos)&(hist.periodo==latest)][["clave","nombre_completo","agrupador"]].drop_duplicates(),use_container_width=True)
-
-        st.warning("Las altas/bajas son 'posibles' porque se basan en presencia/ausencia en los periodos cargados.")
-
-# ROTATION
-with t5:
-    st.subheader("📈 Rotación y antigüedad")
-    rows=[]
-    for i,p in enumerate(periods):
-        curr=set(hist[hist.periodo==p].clave)
-        if i==0:
-            alta=len(curr); baja=0
+        if previous == current:
+            st.warning("Selecciona dos periodos diferentes.")
         else:
-            prev_set=set(hist[hist.periodo==periods[i-1]].clave)
-            alta=len(curr-prev_set); baja=len(prev_set-curr)
-        avg=((len(curr)+(len(set(hist[hist.periodo==periods[i-1]].clave))) if i>0 else len(curr))/2)
-        rot=(baja/avg*100) if avg else 0
-        rows.append([p,len(curr),alta,baja,rot])
-    rot_df=pd.DataFrame(rows,columns=["Periodo","Trabajadores","Altas","Bajas","Rotación %"])
-    st.dataframe(rot_df.style.format({"Rotación %":"{:.2f}%"}),use_container_width=True)
-    st.subheader("Rotación por periodo")
-    st.line_chart(rot_df.set_index("Periodo")["Rotación %"])
+            affected = affected_workers(hist, previous, current)
+            decreases = affected[affected["diferencia"] < 0].copy() if not affected.empty else pd.DataFrame()
+            increases = affected[affected["diferencia"] > 0].copy() if not affected.empty else pd.DataFrame()
+            total_loss = decreases["perdida"].sum() if not decreases.empty else 0
 
-    st.subheader("Antigüedad")
-    first_period=hist.groupby("clave")["periodo"].agg(lambda s:min(s,key=period_key)).reset_index(name="primer_periodo")
-    first_period["orden"]=first_period.primer_periodo.map(period_key)
-    first_period["antiguedad_periodos"]=len(periods)-first_period["orden"].map(lambda x:x[1])+first_period["orden"].map(lambda x:x[1]) - first_period["orden"].map(lambda x:x[1])
-    # More robust: index in ordered period list.
-    idx={p:i for i,p in enumerate(periods)}
-    first_period["antiguedad_periodos"]=first_period.primer_periodo.map(lambda p: len(periods)-idx.get(p, len(periods)-1))
-    bins=[0,4,8,13,26,52,9999]
-    labels=["0-4","5-8","9-13","14-26","27-52","53+"]
-    first_period["rango"]=pd.cut(first_period.antiguedad_periodos,bins=bins,labels=labels,include_lowest=True)
-    st.dataframe(first_period.groupby("rango",observed=False).size().reset_index(name="trabajadores"),use_container_width=True)
+            a,b,c,d = st.columns(4)
+            a.metric("Trabajadores afectados", f"{len(affected):,}")
+            b.metric("Disminuyeron", f"{len(decreases):,}")
+            c.metric("Aumentaron", f"{len(increases):,}")
+            d.metric("Dinero dejado de percibir", f"${total_loss:,.2f}")
 
-# HISTORICAL
-with t6:
-    st.subheader("📊 Histórico")
-    summary=hist.groupby("periodo").agg(trabajadores=("clave","nunique"),registros=("clave","size"),importe_total=("importe","sum")).reset_index()
-    summary["orden"]=summary.periodo.map(period_key); summary=summary.sort_values("orden").drop(columns="orden")
-    st.dataframe(summary.style.format({"importe_total":"${:,.2f}"}),use_container_width=True)
-    st.bar_chart(summary.set_index("periodo")["importe_total"])
+            st.subheader(f"📉 Afectados económicamente: {previous} → {current}")
+            if decreases.empty:
+                st.success("Ningún trabajador tuvo disminución.")
+            else:
+                show = decreases[["clave","nombre_completo","importe_anterior","importe_actual","diferencia","conceptos_afectados"]].copy()
+                show.columns = ["Nómina","Trabajador",previous,current,"Diferencia","Conceptos afectados"]
+                st.dataframe(
+                    show.style.format({previous:"${:,.2f}", current:"${:,.2f}", "Diferencia":"${:,.2f}"}),
+                    use_container_width=True
+                )
 
-    st.subheader("🔁 Comparativo")
-    if len(periods)>=2:
-        p1,p2=st.columns(2)
-        aa=p1.selectbox("Anterior",periods[:-1],index=len(periods[:-1])-1,key="hist_prev")
-        bb=p2.selectbox("Actual",periods[1:],index=len(periods[1:])-1,key="hist_curr")
-        comp=compare_periods(hist,aa,bb)
-        st.metric("Variación total",f"${comp[bb].sum()-comp[aa].sum():,.2f}")
-        st.dataframe(comp[["clave","nombre_completo","concepto",aa,bb,"diferencia","tipo"]]
-                     .style.format({aa:"${:,.2f}",bb:"${:,.2f}","diferencia":"${:,.2f}"}),use_container_width=True)
+                st.subheader("🔎 Conceptos que provocaron la afectación")
+                detail = worker_change_detail(hist, previous, current)
+                detail = detail[detail["diferencia"] < 0][
+                    ["clave","nombre_completo","concepto",previous,current,"diferencia","tipo"]
+                ]
+                st.dataframe(
+                    detail.style.format({previous:"${:,.2f}", current:"${:,.2f}", "diferencia":"${:,.2f}"}),
+                    use_container_width=True
+                )
+                st.download_button(
+                    "⬇️ Descargar detalle de afectados",
+                    detail.to_csv(index=False).encode("utf-8-sig"),
+                    f"afectados_{previous}_vs_{current}.csv",
+                    "text/csv",
+                    key="download_affected"
+                )
 
-# DATABASE
-with t7:
-    st.subheader("🗃️ Base histórica")
-    st.dataframe(hist.sort_values(["periodo","clave","concepto"]),use_container_width=True)
-    buf=BytesIO()
-    with pd.ExcelWriter(buf,engine="openpyxl") as writer:
-        hist.to_excel(writer,index=False,sheet_name="Historico")
+                st.subheader("📊 Mayores pérdidas")
+                impact = decreases.set_index("nombre_completo")["perdida"].sort_values(ascending=False).head(20)
+                st.bar_chart(impact)
+
+with t4:
+    st.subheader("Resumen por periodo")
+    resumen = hist.groupby("periodo").agg(
+        trabajadores=("clave","nunique"),
+        registros=("clave","size"),
+        importe_total=("importe","sum")
+    ).reset_index()
+    st.dataframe(resumen.style.format({"importe_total":"${:,.2f}"}), use_container_width=True)
+    st.bar_chart(resumen.set_index("periodo")["importe_total"])
+
+with t5:
+    st.subheader("Base histórica completa")
+    st.dataframe(hist.sort_values(["periodo","clave","concepto"]), use_container_width=True)
+
+    buf = BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        hist.to_excel(writer, index=False, sheet_name="Historico")
     buf.seek(0)
-    st.download_button("⬇️ Descargar histórico Excel",buf,"historico_nomina.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key="dl_hist")
+    st.download_button(
+        "⬇️ Descargar histórico completo en Excel",
+        buf,
+        "historico_nomina.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
