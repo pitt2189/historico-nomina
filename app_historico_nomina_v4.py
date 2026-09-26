@@ -3,6 +3,9 @@ import pandas as pd
 import sqlite3
 from io import BytesIO
 import re
+import os
+import shutil
+from datetime import datetime
 
 DB_FILE = "historico_nomina.db"
 
@@ -169,6 +172,17 @@ def get_history():
     c.close()
     return d
 
+
+def delete_period(period):
+    """Elimina todos los registros correspondientes a un periodo/semanal seleccionado."""
+    c = conn()
+    cur = c.execute("DELETE FROM movimientos WHERE periodo = ?", (str(period),))
+    deleted = cur.rowcount
+    c.commit()
+    c.close()
+    return deleted
+
+
 init_db()
 
 st.title("📊 Histórico de Nómina")
@@ -198,6 +212,58 @@ with st.sidebar:
                 st.rerun()
         except Exception as e:
             st.error(str(e))
+
+    # ---------------------------------------------------------
+    # Eliminar semanas / periodos cargados anteriormente
+    # ---------------------------------------------------------
+    with st.expander("🗑️ Eliminar semana cargada anteriormente"):
+        current_hist = get_history()
+
+        if current_hist.empty:
+            st.info("No hay semanas cargadas para eliminar.")
+        else:
+            available_periods = ordered_periods(current_hist)
+            period_to_delete = st.selectbox(
+                "Selecciona la semana o periodo que deseas eliminar",
+                available_periods,
+                key="period_to_delete"
+            )
+
+            records_to_delete = int(
+                (current_hist["periodo"].astype(str) == str(period_to_delete)).sum()
+            )
+
+            st.warning(
+                f"⚠️ Se eliminarán **{records_to_delete:,} registros** del periodo "
+                f"**{period_to_delete}**. Esta acción no se puede deshacer."
+            )
+
+            confirm_delete = st.checkbox(
+                f"Confirmo que quiero eliminar el periodo {period_to_delete}",
+                key="confirm_delete_period"
+            )
+
+            if st.button(
+                "🗑️ Eliminar periodo seleccionado",
+                type="secondary",
+                disabled=not confirm_delete,
+                key="delete_period_button"
+            ):
+                # Crear respaldo automático antes de borrar
+                backup = make_backup()
+                deleted = delete_period(period_to_delete)
+
+                if backup:
+                    st.success(
+                        f"Se eliminaron {deleted:,} registros del periodo "
+                        f"{period_to_delete}. Respaldo creado: {backup}"
+                    )
+                else:
+                    st.success(
+                        f"Se eliminaron {deleted:,} registros del periodo "
+                        f"{period_to_delete}."
+                    )
+                st.rerun()
 
 hist = get_history()
 if hist.empty:
