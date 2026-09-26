@@ -11,32 +11,6 @@ DB_FILE = "historico_nomina.db"
 
 st.set_page_config(page_title="Histórico de Nómina", page_icon="📊", layout="wide")
 
-def check_password():
-    """Muestra un campo de contraseña y detiene la app si no coincide con st.secrets['app_password']."""
-
-    def password_entered():
-        if st.session_state.get("password_input") == st.secrets.get("app_password"):
-            st.session_state["password_correct"] = True
-            del st.session_state["password_input"]
-        else:
-            st.session_state["password_correct"] = False
-
-    if st.session_state.get("password_correct"):
-        return True
-
-    st.text_input(
-        "🔒 Contraseña de acceso",
-        type="password",
-        on_change=password_entered,
-        key="password_input",
-    )
-    if st.session_state.get("password_correct") is False:
-        st.error("Contraseña incorrecta.")
-    return False
-
-if not check_password():
-    st.stop()
-
 ALIASES = {
     "agrupador": ["agrupador", "grupo", "agrupación"],
     "concepto": ["concepto", "conceptos"],
